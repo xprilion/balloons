@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drifting Balloons</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #222; /* Fallback dark */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #config-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(5px);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: none; /* Hidden by default */
+            width: 300px;
+            z-index: 100;
+        }
+        #config-panel h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            padding-bottom: 10px;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        .control-group label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+        .control-group input[type=range] {
+            width: 100%;
+            cursor: pointer;
+        }
+        .hint {
+            font-size: 0.8rem;
+            color: rgba(255,255,255,0.5);
+            margin-top: 10px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<!-- Configuration Panel -->
+<div id="config-panel">
+    <h3>Settings</h3>
+    
+    <div class="control-group">
+        <label>Balloon Count: <span id="val-balloonCount">35</span></label>
+        <input type="range" id="inp-balloonCount" min="0" max="100" value="35">
+    </div>
+
+    <div class="control-group">
+        <label>Balloon Size: <span id="val-balloonScale">1.0</span></label>
+        <input type="range" id="inp-balloonScale" min="0.5" max="2.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="control-group">
+        <label>Background Color: <span id="val-bgColor">#87CEEB</span></label>
+        <input type="color" id="inp-bgColor" value="#87CEEB">
+    </div>
+
+    <div class="control-group">
+        <label>Orb Color: <span id="val-orbColor">#ADD8E6</span></label>
+        <input type="color" id="inp-orbColor" value="#ADD8E6">
+    </div>
+
+    <div class="control-group">
+        <label>Background Speed: <span id="val-bgSpeed">0.5</span></label>
+        <input type="range" id="inp-bgSpeed" min="0.1" max="5.0" step="0.1" value="0.5">
+    </div>
+
+    <div class="control-group">
+        <label>Background Orbs: <span id="val-bgOrbs">5</span></label>
+        <input type="range" id="inp-bgOrbs" min="1" max="20" value="5">
+    </div>
+
+    <div class="hint">Press 't' to toggle this menu</div>
+</div>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // --- CONFIGURATION ---
+    const DEFAULT_CONFIG = {
+        balloonCount: 35,
+        balloonScale: 1.0,   // Scale multiplier for balloon size
+        // Background Settings
+        bgColor: '#87CEEB',  // Hex color for the solid background
+        orbColor: '#ADD8E6', // Hex color for the moving orbs
+        bgHueRange: 60,      // How much colors drift from the base
+        bgSpeed: 0.5,        // Speed of the moving gradients
+        bgPulseSpeed: 0.01,  // Speed of the size pulsation
+        bgOrbs: 5            // Number of moving gradient orbs
+    };
+
+    let CONFIG = Object.assign({}, DEFAULT_CONFIG);
+
+    // Persistence
+    function loadConfig() {
+        const saved = localStorage.getItem('balloon_config');
+        if(saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                Object.assign(CONFIG, parsed);
+            } catch(e) { console.error("Config load error", e); }
+        }
+    }
+    
+    function saveConfig() {
+        localStorage.setItem('balloon_config', JSON.stringify(CONFIG));
+    }
+
+    // Load immediately before other inits
+    loadConfig();
+
+    let width, height;
+    let balloons = [];
+    let bgOrbs = [];
+    let time = 0;
+
+    // Resize handling
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+        // Re-init background on resize to cover new area
+        initBackground();
+    }
+    window.addEventListener('resize', resize);
+    
+    // Utility: Random range
+    function random(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    // Utility: Hex to HSL
+    function hexToHSL(hex) {
+        let r = 0, g = 0, b = 0;
+        if (hex.length === 4) {
+            r = parseInt("0x" + hex[1] + hex[1]);
+            g = parseInt("0x" + hex[2] + hex[2]);
+            b = parseInt("0x" + hex[3] + hex[3]);
+        } else if (hex.length === 7) {
+            r = parseInt("0x" + hex[1] + hex[2]);
+            g = parseInt("0x" + hex[3] + hex[4]);
+            b = parseInt("0x" + hex[5] + hex[6]);
+        }
+        r /= 255; g /= 255; b /= 255;
+        let cmin = Math.min(r,g,b), cmax = Math.max(r,g,b), delta = cmax - cmin;
+        let h = 0, s = 0, l = 0;
+
+        if (delta === 0) h = 0;
+        else if (cmax === r) h = ((g - b) / delta) % 6;
+        else if (cmax === g) h = (b - r) / delta + 2;
+        else h = (r - g) / delta + 4;
+
+        h = Math.round(h * 60);
+        if (h < 0) h += 360;
+
+        l = (cmax + cmin) / 2;
+        s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
+        s = +(s * 100).toFixed(1);
+        l = +(l * 100).toFixed(1);
+
+        return {h, s, l};
+    }
+
+    // --- UI CONTROLS ---
+    const panel = document.getElementById('config-panel');
+    
+    // Toggle visibility
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 't' || e.key === 'T') {
+            panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+        }
+    });
+
+    // Bind inputs to config
+    function bindInput(id, configKey, displayId, callback) {
+        const input = document.getElementById(id);
+        const display = document.getElementById(displayId);
+        
+        // Set initial values
+        input.value = CONFIG[configKey];
+        if(display) display.textContent = CONFIG[configKey];
+
+        input.addEventListener('input', (e) => {
+            let val = e.target.value;
+            // Parse numbers for ranges, keep strings for color
+            if (e.target.type === 'range') {
+                val = parseFloat(val);
+            }
+            CONFIG[configKey] = val;
+            saveConfig(); // Save to local storage
+
+            if (display) display.textContent = val;
+            if (callback) callback();
+        });
+    }
+
+    // Initialize bindings
+    bindInput('inp-balloonCount', 'balloonCount', 'val-balloonCount', initBalloons);
+    bindInput('inp-balloonScale', 'balloonScale', 'val-balloonScale'); 
+    bindInput('inp-bgColor', 'bgColor', 'val-bgColor'); 
+    bindInput('inp-orbColor', 'orbColor', 'val-orbColor');
+    bindInput('inp-bgSpeed', 'bgSpeed', 'val-bgSpeed', initBackground); 
+    bindInput('inp-bgOrbs', 'bgOrbs', 'val-bgOrbs', initBackground);
+
+
+    // --- BACKGROUND SYSTEM ---
+    class GradientOrb {
+        constructor() {
+            this.init();
+        }
+
+        init() {
+            this.x = random(0, width);
+            this.y = random(0, height);
+            // Random velocity vectors
+            this.vx = random(-1, 1) * CONFIG.bgSpeed;
+            this.vy = random(-1, 1) * CONFIG.bgSpeed;
+            
+            this.radiusBase = Math.max(width, height) * 0.4;
+            this.radius = this.radiusBase;
+            this.hueOffset = random(-CONFIG.bgHueRange/2, CONFIG.bgHueRange/2);
+            
+            // Random phase for pulsation
+            this.pulsePhase = random(0, Math.PI * 2);
+        }
+
+        update() {
+            // Move
+            this.x += this.vx;
+            this.y += this.vy;
+
+            // Soft bounce with random perturbation to prevent looping
+            if (this.x < -this.radius/2 || this.x > width + this.radius/2) {
+                this.vx *= -1;
+                this.vx += random(-0.2, 0.2); // Add chaos
+            }
+            if (this.y < -this.radius/2 || this.y > height + this.radius/2) {
+                this.vy *= -1;
+                this.vy += random(-0.2, 0.2); // Add chaos
+            }
+
+            // Cap velocity based on current CONFIG speed
+            const maxSpeed = CONFIG.bgSpeed * 2;
+            this.vx = Math.max(Math.min(this.vx, maxSpeed), -maxSpeed);
+            this.vy = Math.max(Math.min(this.vy, maxSpeed), -maxSpeed);
+
+            // Pulse Size
+            this.radius = this.radiusBase + Math.sin(time * CONFIG.bgPulseSpeed + this.pulsePhase) * 100;
+        }
+
+        draw(ctx) {
+            const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius);
+            
+            // Calculate dynamic color based on picked ORB color
+            const baseHSL = hexToHSL(CONFIG.orbColor);
+            
+            // Slowly drift the base hue over time as well
+            const timeShift = Math.sin(time * 0.001) * 20; 
+            const h = (baseHSL.h + this.hueOffset + timeShift + 360) % 360;
+            const s = baseHSL.s;
+            const l = baseHSL.l;
+            
+            gradient.addColorStop(0, `hsla(${h}, ${s}%, ${l}%, 0.4)`); // Center
+            gradient.addColorStop(1, `hsla(${h}, ${s}%, ${l}%, 0)`);   // Edge
+
+            ctx.globalCompositeOperation = 'source-over'; 
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function initBackground() {
+        bgOrbs = [];
+        for(let i=0; i<CONFIG.bgOrbs; i++) {
+            bgOrbs.push(new GradientOrb());
+        }
+    }
+
+    // --- BALLOON SYSTEM ---
+    class Balloon {
+        constructor(reset = false) {
+            this.init(reset);
+        }
+
+        init(reset) {
+            this.baseRadius = random(20, 40); // Store base radius
+            this.radius = this.baseRadius * CONFIG.balloonScale; // Initial calc
+            
+            this.y = reset ? height + this.radius + random(0, 100) : random(height + 100, -100);
+            this.x = random(0, width);
+            this.speed = random(0.5, 2);
+            
+            this.swayAmplitude = random(20, 50);
+            this.swayFrequency = random(0.005, 0.02);
+            this.swayPhase = random(0, Math.PI * 2);
+            this.baseX = this.x;
+
+            const hue = random(0, 360);
+            this.color = `hsla(${hue}, 70%, 60%, 0.9)`;
+            this.shineColor = `hsla(${hue}, 70%, 80%, 0.6)`;
+            this.stringLength = random(60, 100);
+        }
+
+        update() {
+            // Recalculate radius based on current scale setting
+            this.radius = this.baseRadius * CONFIG.balloonScale;
+            
+            this.y -= this.speed;
+            this.x = this.baseX + Math.sin(time * this.swayFrequency + this.swayPhase) * this.swayAmplitude;
+
+            if (this.y < -this.radius - this.stringLength) {
+                this.init(true);
+            }
+        }
+
+        draw(ctx) {
+            ctx.globalCompositeOperation = 'source-over';
+            
+            // Draw String
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y + this.radius);
+            let swayOffset = (this.x - this.baseX) * 0.5;
+            ctx.quadraticCurveTo(
+                this.x - swayOffset, 
+                this.y + this.radius + (this.stringLength / 2), 
+                this.x, 
+                this.y + this.radius + this.stringLength
+            );
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Draw Balloon
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.scale(1, 1.2);
+            
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.fillStyle = this.color;
+            ctx.fill();
+
+            // Shine
+            ctx.beginPath();
+            ctx.arc(-this.radius * 0.3, -this.radius * 0.3, this.radius * 0.2, 0, Math.PI * 2);
+            ctx.fillStyle = this.shineColor;
+            ctx.fill();
+
+            // Tie
+            ctx.beginPath();
+            ctx.moveTo(-5, this.radius - 2);
+            ctx.lineTo(5, this.radius - 2);
+            ctx.lineTo(0, this.radius + 6);
+            ctx.closePath();
+            ctx.fillStyle = this.color;
+            ctx.fill();
+
+            ctx.restore();
+        }
+    }
+
+    function initBalloons() {
+        // If we are increasing count, add more. If decreasing, trim. 
+        // Or just re-init completely for simplicity (which randomizes positions again)
+        // To keep existing balloons, let's try a diff approach:
+        
+        const diff = CONFIG.balloonCount - balloons.length;
+        if (diff > 0) {
+            for(let i=0; i<diff; i++) balloons.push(new Balloon(false)); // Add new
+        } else if (diff < 0) {
+            balloons.splice(diff); // Remove excess
+        }
+    }
+
+    // --- MAIN LOOP ---
+    // Initialize everything
+    resize(); // Sets up bgOrbs
+    initBalloons();
+
+    function drawBackground() {
+        // Fill base background
+        ctx.fillStyle = CONFIG.bgColor; 
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw dynamic orbs
+        bgOrbs.forEach(orb => {
+            orb.update();
+            orb.draw(ctx);
+        });
+    }
+
+    function animate() {
+        drawBackground();
+
+        balloons.forEach(balloon => {
+            balloon.update();
+            balloon.draw(ctx);
+        });
+
+        time++;
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+
+</script>
+</body>
+</html>
